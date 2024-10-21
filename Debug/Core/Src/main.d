@@ -35,10 +35,17 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
  ../Drivers/STM32WBxx_HAL_Driver/Inc/stm32wbxx_ll_bus.h \
  ../Drivers/STM32WBxx_HAL_Driver/Inc/stm32wbxx_hal_rcc_ex.h \
  ../Drivers/STM32WBxx_HAL_Driver/Inc/stm32wbxx_ll_crs.h \
+ ../Drivers/STM32WBxx_HAL_Driver/Inc/stm32wbxx_hal_spi.h \
+ ../Drivers/STM32WBxx_HAL_Driver/Inc/stm32wbxx_hal_spi_ex.h \
  ../Drivers/STM32WBxx_HAL_Driver/Inc/stm32wbxx_hal_uart.h \
  ../Drivers/STM32WBxx_HAL_Driver/Inc/stm32wbxx_hal_uart_ex.h \
  ../Drivers/STM32WBxx_HAL_Driver/Inc/stm32wbxx_ll_system.h \
- ../Core/Inc/lis2dh12_reg.h
+ ../FATFS/App/app_fatfs.h ../Middlewares/Third_Party/FatFs/src/ff.h \
+ ../Middlewares/Third_Party/FatFs/src/integer.h ../FATFS/Target/ffconf.h \
+ ../Middlewares/Third_Party/FatFs/src/ff_gen_drv.h \
+ ../Middlewares/Third_Party/FatFs/src/diskio.h \
+ ../Middlewares/Third_Party/FatFs/src/ff.h ../FATFS/Target/user_diskio.h \
+ ../Core/Inc/fatfs_sd.h ../Core/Inc/lis2dh12_reg.h
 ../Core/Inc/main.h:
 ../Drivers/STM32WBxx_HAL_Driver/Inc/stm32wbxx_hal.h:
 ../Core/Inc/stm32wbxx_hal_conf.h:
@@ -76,7 +83,18 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
 ../Drivers/STM32WBxx_HAL_Driver/Inc/stm32wbxx_ll_bus.h:
 ../Drivers/STM32WBxx_HAL_Driver/Inc/stm32wbxx_hal_rcc_ex.h:
 ../Drivers/STM32WBxx_HAL_Driver/Inc/stm32wbxx_ll_crs.h:
+../Drivers/STM32WBxx_HAL_Driver/Inc/stm32wbxx_hal_spi.h:
+../Drivers/STM32WBxx_HAL_Driver/Inc/stm32wbxx_hal_spi_ex.h:
 ../Drivers/STM32WBxx_HAL_Driver/Inc/stm32wbxx_hal_uart.h:
 ../Drivers/STM32WBxx_HAL_Driver/Inc/stm32wbxx_hal_uart_ex.h:
 ../Drivers/STM32WBxx_HAL_Driver/Inc/stm32wbxx_ll_system.h:
+../FATFS/App/app_fatfs.h:
+../Middlewares/Third_Party/FatFs/src/ff.h:
+../Middlewares/Third_Party/FatFs/src/integer.h:
+../FATFS/Target/ffconf.h:
+../Middlewares/Third_Party/FatFs/src/ff_gen_drv.h:
+../Middlewares/Third_Party/FatFs/src/diskio.h:
+../Middlewares/Third_Party/FatFs/src/ff.h:
+../FATFS/Target/user_diskio.h:
+../Core/Inc/fatfs_sd.h:
 ../Core/Inc/lis2dh12_reg.h:

@@ -9,6 +9,10 @@ RM := rm -rf
 
 # All of the sources participating in the build are defined here
 -include sources.mk
+-include Middlewares/Third_Party/FatFs/src/option/subdir.mk
+-include Middlewares/Third_Party/FatFs/src/subdir.mk
+-include FATFS/Target/subdir.mk
+-include FATFS/App/subdir.mk
 -include Drivers/STM32WBxx_HAL_Driver/Src/subdir.mk
 -include Core/Startup/subdir.mk
 -include Core/Src/subdir.mk
@@ -60,8 +64,8 @@ all: main-build
 main-build: STM32WB55_LIS2DH_Example.elf secondary-outputs
 
 # Tool invocations
-STM32WB55_LIS2DH_Example.elf STM32WB55_LIS2DH_Example.map: $(OBJS) $(USER_OBJS) D:\stm_project\STM32WB55\STM32WB55RGVX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "STM32WB55_LIS2DH_Example.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"D:\stm_project\STM32WB55\STM32WB55RGVX_FLASH.ld" --specs=nosys.specs -Wl,-Map="STM32WB55_LIS2DH_Example.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -u _printf_float -u _scanf_float -Wl,--start-group -lc -lm -Wl,--end-group
+STM32WB55_LIS2DH_Example.elf STM32WB55_LIS2DH_Example.map: $(OBJS) $(USER_OBJS) D:\stm_project\STM32WB55_LIS2DH_Example\STM32WB55RGVX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-gcc -o "STM32WB55_LIS2DH_Example.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"D:\stm_project\STM32WB55_LIS2DH_Example\STM32WB55RGVX_FLASH.ld" --specs=nosys.specs -Wl,-Map="STM32WB55_LIS2DH_Example.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -u _printf_float -u _scanf_float -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 

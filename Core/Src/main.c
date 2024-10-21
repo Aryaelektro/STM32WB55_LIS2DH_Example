@@ -18,13 +18,15 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "stdio.h"
-#include <string.h>
-#include "lis2dh12_reg.h"
+#include "app_fatfs.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "fatfs_sd.h"
+#include "stdio.h"
+#include "stdlib.h"
+#include <string.h>
+#include "lis2dh12_reg.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -35,6 +37,9 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define SENSOR_BUS hi2c1
+#define BUFFER_SIZE 128
+char buffer[BUFFER_SIZE];  // to store strings..
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -44,6 +49,8 @@
 
 /* Private variables ---------------------------------------------------------*/
 I2C_HandleTypeDef hi2c1;
+
+SPI_HandleTypeDef hspi1;
 
 UART_HandleTypeDef huart1;
 
@@ -57,6 +64,18 @@ static float temperature_degC;
 static uint8_t whoamI;
 static uint8_t tx_buffer[1000];
 char *text;
+FATFS fs;  // file system
+FIL fil; // File
+FILINFO fno;
+FRESULT fresult;  // result
+UINT br, bw;  // File read/write count
+
+/**** capacity related *****/
+FATFS *pfs;
+DWORD fre_clust;
+uint32_t total, free_space;
+int i = 0;
+char dummy[500];
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -66,12 +85,15 @@ static void MX_GPIO_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USB_PCD_Init(void);
 static void MX_I2C1_Init(void);
+static void MX_SPI1_Init(void);
 /* USER CODE BEGIN PFP */
 static void platform_write(void *handle, uint8_t reg, const uint8_t *bufp, uint16_t len);
 static void platform_read(void *handle, uint8_t reg, uint8_t *bufp, uint16_t len);
-static void tx_com(uint8_t *tx_buffer, uint16_t len);
+void send_uart(char *string);
 static void platform_delay(uint32_t ms);
 void lis2dh12_read_data_polling(void);
+void clear_buffer(void);
+int bufsize(char *buf);
 //static void platform_init(void);
 /* USER CODE END PFP */
 
@@ -88,6 +110,76 @@ int _write(int32_t file, uint8_t *ptr, int32_t len)
 }
 
 /* Main Example --------------------------------------------------------------*/
+void logging_sdcard(char *data)
+{
+  char Data[BUFFER_SIZE];
+  send_uart("START LOGGING\n");
+  memcpy(Data, data, sizeof(buffer));
+
+  // Mount SDCard
+  send_uart("MOUNTING_SD_CARD\n");
+  HAL_Delay(1000);
+
+  fresult = f_mount(&fs, "", 1); /* Mode option 0:Do not mount (delayed mount), 1:Mount immediately */
+  if (fresult != FR_OK)
+  {
+    send_uart("*************************************\n");
+    send_uart("ERR_MOUNTING_SD_CARD\n");
+    send_uart("*************************************\n");
+    for (int x = 0; x < 6; x++)
+    {
+      HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_8);
+      HAL_Delay(500);
+    }
+  }
+  else
+  {
+    send_uart("*************************************\n");
+    send_uart("SUCC_MOUNTING_SD_CARD\n");
+    send_uart("*************************************\n");
+  }
+
+  /*************** Card capacity details ********************/
+  /*Checking free space*/
+  f_getfree("", &fre_clust, &pfs);
+  total = (uint32_t) ((pfs->n_fatent - 2) * pfs->csize * 0.5);
+  sprintf(buffer, "SD_CARD_TOTAL_SIZE: \t%lu\n", total);
+  send_uart(buffer);
+  clear_buffer();
+  free_space = (uint32_t) (fre_clust * pfs->csize * 0.5);
+  sprintf(buffer, "SD_CARD_FREE_SPACE: \t%lu\n", free_space);
+  send_uart(buffer);
+  clear_buffer();
+
+  sprintf(buffer, Data);
+  if (f_open(&fil, "log.txt", FA_OPEN_APPEND | FA_WRITE) == FR_OK)
+  {
+    send_uart(buffer);
+    f_write(&fil, buffer, bufsize(buffer), 0);
+    f_close(&fil);
+  }
+
+  /* Open file to read */
+  fresult = f_open(&fil, "log.txt", FA_OPEN_EXISTING | FA_READ);
+  memset(buffer,0,128);
+  uint64_t size = fil.obj.objsize;
+  f_read(&fil, buffer, size, 0);
+
+  send_uart("log.txt is opened and it contains the data as shown below:\n");
+  send_uart(buffer);
+  send_uart("\n\n");
+  f_close(&fil);
+  clear_buffer();
+
+  /* Unmount SDCARD */
+  fresult = f_mount(NULL, "", 0);
+  if (fresult == FR_OK)
+  {
+    send_uart("SD CARD UNMOUNTED successfully...\n");
+  }
+  clear_buffer();
+}
+
 void lis2dh12_read_data_polling(void)
 {
   /* Initialize mems driver interface */
@@ -122,7 +214,8 @@ void lis2dh12_read_data_polling(void)
   lis2dh12_operating_mode_set(&dev_ctx, LIS2DH12_HR_12bit);
 
   /* Read samples in polling mode (no int) */
-  while (1)
+  char cnt = 4;
+  while (cnt--)
   {
     lis2dh12_reg_t reg;
     /* Read output only if new value available */
@@ -142,7 +235,7 @@ void lis2dh12_read_data_polling(void)
           acceleration_mg[0],
           acceleration_mg[1],
           acceleration_mg[2]);
-      tx_com(tx_buffer, strlen((char const*) tx_buffer));
+      send_uart((char*)tx_buffer);
     }
 
     lis2dh12_temp_data_ready_get(&dev_ctx, &reg.byte);
@@ -154,7 +247,7 @@ void lis2dh12_read_data_polling(void)
       lis2dh12_temperature_raw_get(&dev_ctx, &data_raw_temperature);
       temperature_degC = lis2dh12_from_lsb_hr_to_celsius(data_raw_temperature);
       sprintf((char*) tx_buffer, "Temperature [degC]:%6.2f\r\n", temperature_degC);
-      tx_com(tx_buffer, strlen((char const*) tx_buffer));
+      send_uart((char*)tx_buffer);
     }
   }
 }
@@ -184,23 +277,38 @@ static void platform_read(void *handle, uint8_t reg, uint8_t *bufp, uint16_t len
   I2C_MEMADD_SIZE_8BIT, bufp, len, 1000);
 }
 
-static void tx_com(uint8_t *tx_buffer, uint16_t len)
+void send_uart(char *string)
 {
-  HAL_UART_Transmit(&huart1, tx_buffer, len, 1000);
+  uint8_t len = strlen(string);
+  HAL_UART_Transmit(&huart1, (uint8_t*) string, len, 1000);
 }
 
 static void platform_delay(uint32_t ms)
 {
-
   HAL_Delay(ms);
+}
+
+
+int bufsize(char *buf)
+{
+  int i = 0;
+  while (*buf++ != '\0')
+    i++;
+  return i;
+}
+
+void clear_buffer(void)
+{
+  for (int i = 0; i < BUFFER_SIZE; i++)
+    buffer[i] = '\0';
 }
 
 /* USER CODE END 0 */
 
 /**
- * @brief  The application entry point.
- * @retval int
- */
+  * @brief  The application entry point.
+  * @retval int
+  */
 int main(void)
 {
 
@@ -232,10 +340,13 @@ int main(void)
   MX_USART1_UART_Init();
   MX_USB_PCD_Init();
   MX_I2C1_Init();
+  MX_SPI1_Init();
+  if (MX_FATFS_Init() != APP_OK) {
+    Error_Handler();
+  }
   /* USER CODE BEGIN 2 */
-  lis2dh12_read_data_polling();
-  HAL_Delay(1000);
-
+  logging_sdcard("################\n");
+  int count = 0;
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -245,42 +356,38 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-
-    /* USER CODE END 3 */
+   count++;
+   sprintf(dummy, "Test : %d\n",count);
+   logging_sdcard(dummy);
+   //logging_sdcard("Test_Logging\n");
+   HAL_Delay(2000);
   }
+  /* USER CODE END 3 */
 }
 
 /**
- * @brief System Clock Configuration
- * @retval None
- */
+  * @brief System Clock Configuration
+  * @retval None
+  */
 void SystemClock_Config(void)
 {
-  RCC_OscInitTypeDef RCC_OscInitStruct = { 0 };
-  RCC_ClkInitTypeDef RCC_ClkInitStruct = { 0 };
-
-  /** Macro to configure the PLL multiplication factor
-   */
-  __HAL_RCC_PLL_PLLM_CONFIG(RCC_PLLM_DIV1);
-
-  /** Macro to configure the PLL clock source
-   */
-  __HAL_RCC_PLL_PLLSOURCE_CONFIG(RCC_PLLSOURCE_MSI);
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
   /** Configure LSE Drive Capability
-   */
+  */
   HAL_PWR_EnableBkUpAccess();
   __HAL_RCC_LSEDRIVE_CONFIG(RCC_LSEDRIVE_LOW);
 
   /** Configure the main internal regulator output voltage
-   */
+  */
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
   /** Initializes the RCC Oscillators according to the specified parameters
-   * in the RCC_OscInitTypeDef structure.
-   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI | RCC_OSCILLATORTYPE_HSE | RCC_OSCILLATORTYPE_LSE
-      | RCC_OSCILLATORTYPE_MSI;
+  * in the RCC_OscInitTypeDef structure.
+  */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_HSE
+                              |RCC_OSCILLATORTYPE_LSE|RCC_OSCILLATORTYPE_MSI;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.LSEState = RCC_LSE_ON;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
@@ -288,17 +395,24 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.MSICalibrationValue = RCC_MSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_6;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_MSI;
+  RCC_OscInitStruct.PLL.PLLM = RCC_PLLM_DIV1;
+  RCC_OscInitStruct.PLL.PLLN = 24;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+  RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV3;
+  RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV2;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
   }
 
   /** Configure the SYSCLKSource, HCLK, PCLK1 and PCLK2 clocks dividers
-   */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK4 | RCC_CLOCKTYPE_HCLK2 | RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
-      | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSE;
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK4|RCC_CLOCKTYPE_HCLK2
+                              |RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
@@ -311,20 +425,20 @@ void SystemClock_Config(void)
   }
 
   /** Enable MSI Auto calibration
-   */
+  */
   HAL_RCCEx_EnableMSIPLLMode();
 }
 
 /**
- * @brief Peripherals Common Clock Configuration
- * @retval None
- */
+  * @brief Peripherals Common Clock Configuration
+  * @retval None
+  */
 void PeriphCommonClock_Config(void)
 {
-  RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = { 0 };
+  RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
 
   /** Initializes the peripherals clock
-   */
+  */
   PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_SMPS;
   PeriphClkInitStruct.SmpsClockSelection = RCC_SMPSCLKSOURCE_HSI;
   PeriphClkInitStruct.SmpsDivSelection = RCC_SMPSCLKDIV_RANGE0;
@@ -339,10 +453,10 @@ void PeriphCommonClock_Config(void)
 }
 
 /**
- * @brief I2C1 Initialization Function
- * @param None
- * @retval None
- */
+  * @brief I2C1 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_I2C1_Init(void)
 {
 
@@ -368,14 +482,14 @@ static void MX_I2C1_Init(void)
   }
 
   /** Configure Analogue filter
-   */
+  */
   if (HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE) != HAL_OK)
   {
     Error_Handler();
   }
 
   /** Configure Digital filter
-   */
+  */
   if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 0) != HAL_OK)
   {
     Error_Handler();
@@ -387,10 +501,50 @@ static void MX_I2C1_Init(void)
 }
 
 /**
- * @brief USART1 Initialization Function
- * @param None
- * @retval None
- */
+  * @brief SPI1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_SPI1_Init(void)
+{
+
+  /* USER CODE BEGIN SPI1_Init 0 */
+
+  /* USER CODE END SPI1_Init 0 */
+
+  /* USER CODE BEGIN SPI1_Init 1 */
+
+  /* USER CODE END SPI1_Init 1 */
+  /* SPI1 parameter configuration*/
+  hspi1.Instance = SPI1;
+  hspi1.Init.Mode = SPI_MODE_MASTER;
+  hspi1.Init.Direction = SPI_DIRECTION_2LINES;
+  hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
+  hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
+  hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
+  hspi1.Init.NSS = SPI_NSS_SOFT;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_16;
+  hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
+  hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
+  hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+  hspi1.Init.CRCPolynomial = 7;
+  hspi1.Init.CRCLength = SPI_CRC_LENGTH_DATASIZE;
+  hspi1.Init.NSSPMode = SPI_NSS_PULSE_ENABLE;
+  if (HAL_SPI_Init(&hspi1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN SPI1_Init 2 */
+
+  /* USER CODE END SPI1_Init 2 */
+
+}
+
+/**
+  * @brief USART1 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_USART1_UART_Init(void)
 {
 
@@ -435,10 +589,10 @@ static void MX_USART1_UART_Init(void)
 }
 
 /**
- * @brief USB Initialization Function
- * @param None
- * @retval None
- */
+  * @brief USB Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_USB_PCD_Init(void)
 {
 
@@ -468,15 +622,15 @@ static void MX_USB_PCD_Init(void)
 }
 
 /**
- * @brief GPIO Initialization Function
- * @param None
- * @retval None
- */
+  * @brief GPIO Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_GPIO_Init(void)
 {
-  GPIO_InitTypeDef GPIO_InitStruct = { 0 };
-  /* USER CODE BEGIN MX_GPIO_Init_1 */
-  /* USER CODE END MX_GPIO_Init_1 */
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+/* USER CODE BEGIN MX_GPIO_Init_1 */
+/* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOC_CLK_ENABLE();
@@ -485,7 +639,10 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOD_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, LD2_Pin | LD3_Pin | LD1_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, LD2_Pin|LD3_Pin|LD1_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_10, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : B1_Pin */
   GPIO_InitStruct.Pin = B1_Pin;
@@ -494,20 +651,27 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : LD2_Pin LD3_Pin LD1_Pin */
-  GPIO_InitStruct.Pin = LD2_Pin | LD3_Pin | LD1_Pin;
+  GPIO_InitStruct.Pin = LD2_Pin|LD3_Pin|LD1_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
+  /*Configure GPIO pin : PC10 */
+  GPIO_InitStruct.Pin = GPIO_PIN_10;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
   /*Configure GPIO pins : B2_Pin B3_Pin */
-  GPIO_InitStruct.Pin = B2_Pin | B3_Pin;
+  GPIO_InitStruct.Pin = B2_Pin|B3_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
-  /* USER CODE BEGIN MX_GPIO_Init_2 */
-  /* USER CODE END MX_GPIO_Init_2 */
+/* USER CODE BEGIN MX_GPIO_Init_2 */
+/* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
@@ -515,9 +679,9 @@ static void MX_GPIO_Init(void)
 /* USER CODE END 4 */
 
 /**
- * @brief  This function is executed in case of error occurrence.
- * @retval None
- */
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
