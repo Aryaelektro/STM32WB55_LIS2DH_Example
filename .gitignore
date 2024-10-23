@@ -1,53 +1,18 @@
-#settings
+# Ignore build directories
 .settings/
+Debug/
+Release/
 
-#metadata
-.metadata/
-
-#Debug
-#Debug/
-#debug/
-#Release/
-#release
-
-# Prerequisites
+# Ignore build artifacts
+*.launch
+*.o
+*.map
 *.d
 
-# Object files
-*.o
-*.ko
-*.obj
+# Ignore .bin and .elf globally
+*.bin
 *.elf
 
-# Linker output
-*.ilk
-*.map
-*.exp
-
-# Libraries
-*.lib
-*.a
-*.la
-*.lo
-
-# Shared objects (inc. Windows DLLs)
-*.dll
-*.so
-*.so.*
-*.dylib
-
-# Executables
-*.exe
-*.out
-*.app
-*.i*86
-*.x86_64
-*.hex
-*.bin
-
-# Debug files
-*.dSYM/
-*.su
-*.idb
-*.pdb
-/Debug/
+# Allow tracking of binaries in a specific folder for tagged releases
+!releases/*.bin
+!releases/*.elf

@@ -44,7 +44,9 @@ char buffer[BUFFER_SIZE];  // to store strings..
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-#define    BOOT_TIME            5 //ms
+#define  BOOT_TIME 5 //ms
+#define  SAMPLES  500
+#define  MAX_SENSOR_DATA 18
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -58,11 +60,12 @@ PCD_HandleTypeDef hpcd_USB_FS;
 
 /* USER CODE BEGIN PV */
 static int16_t data_raw_acceleration[3];
-static int16_t data_raw_temperature;
+//static int16_t data_raw_temperature;
+//static float acceleration_mg[3];
 static float acceleration_mg[3];
-static float temperature_degC;
+//static float temperature_degC;
 static uint8_t whoamI;
-static uint8_t tx_buffer[1000];
+static char tx_buffer[20];
 char *text;
 FATFS fs;  // file system
 FIL fil; // File
@@ -76,6 +79,10 @@ DWORD fre_clust;
 uint32_t total, free_space;
 int i = 0;
 char dummy[500];
+char data_buffer[SAMPLES][MAX_SENSOR_DATA];  // 200 rows, each holding up to 18 characters
+char sd_write_buffer[SAMPLES * MAX_SENSOR_DATA]; // A single buffer for all data (200 * 18 = 3600 bytes max)
+
+size_t total_data_length = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -92,8 +99,10 @@ static void platform_read(void *handle, uint8_t reg, uint8_t *bufp, uint16_t len
 void send_uart(char *string);
 static void platform_delay(uint32_t ms);
 void lis2dh12_read_data_polling(void);
+static void initialize_sd_card();
 void clear_buffer(void);
 int bufsize(char *buf);
+void write_to_sd(char *data, size_t total_size);  // Function prototype
 //static void platform_init(void);
 /* USER CODE END PFP */
 
@@ -110,12 +119,8 @@ int _write(int32_t file, uint8_t *ptr, int32_t len)
 }
 
 /* Main Example --------------------------------------------------------------*/
-void logging_sdcard(char *data)
+static void initialize_sd_card(void)
 {
-  char Data[BUFFER_SIZE];
-  send_uart("START LOGGING\n");
-  memcpy(Data, data, sizeof(buffer));
-
   // Mount SDCard
   send_uart("MOUNTING_SD_CARD\n");
   HAL_Delay(1000);
@@ -150,38 +155,37 @@ void logging_sdcard(char *data)
   sprintf(buffer, "SD_CARD_FREE_SPACE: \t%lu\n", free_space);
   send_uart(buffer);
   clear_buffer();
-
-  sprintf(buffer, Data);
-  if (f_open(&fil, "log.txt", FA_OPEN_APPEND | FA_WRITE) == FR_OK)
-  {
-    send_uart(buffer);
-    f_write(&fil, buffer, bufsize(buffer), 0);
-    f_close(&fil);
-  }
-
-  /* Open file to read */
-  fresult = f_open(&fil, "log.txt", FA_OPEN_EXISTING | FA_READ);
-  memset(buffer,0,128);
-  uint64_t size = fil.obj.objsize;
-  f_read(&fil, buffer, size, 0);
-
-  send_uart("log.txt is opened and it contains the data as shown below:\n");
-  send_uart(buffer);
-  send_uart("\n\n");
-  f_close(&fil);
-  clear_buffer();
-
-  /* Unmount SDCARD */
-  fresult = f_mount(NULL, "", 0);
-  if (fresult == FR_OK)
-  {
-    send_uart("SD CARD UNMOUNTED successfully...\n");
-  }
-  clear_buffer();
 }
 
 void lis2dh12_read_data_polling(void)
 {
+  int counter = 0;
+  int file_exists = 0;
+  char filename[20];
+
+  do
+  {
+    if (counter == 0)
+    {
+      snprintf(filename, sizeof(filename), "test.csv");
+    }
+    else
+    {
+      snprintf(filename, sizeof(filename), "test_%d.csv", counter);
+    }
+
+    if (f_open(&fil, filename, FA_OPEN_EXISTING) == FR_OK)
+    {
+      f_close(&fil);
+      file_exists = 1;
+      counter++;
+    }
+    else
+    {
+      file_exists = 0;
+    }
+  }
+  while (file_exists);
   /* Initialize mems driver interface */
   stmdev_ctx_t dev_ctx;
   dev_ctx.write_reg = platform_write;
@@ -189,7 +193,7 @@ void lis2dh12_read_data_polling(void)
   dev_ctx.mdelay = platform_delay;
   dev_ctx.handle = &hi2c1;
   /* Wait boot time and initialize platform specific hardware */
-//  platform_init();
+  //  platform_init();
   /* Wait sensor boot time */
   platform_delay(BOOT_TIME);
   /* Check device ID */
@@ -209,47 +213,121 @@ void lis2dh12_read_data_polling(void)
   /* Set full scale to 2g. */
   lis2dh12_full_scale_set(&dev_ctx, LIS2DH12_2g);
   /* Enable temperature sensor. */
-  lis2dh12_temperature_meas_set(&dev_ctx, LIS2DH12_TEMP_ENABLE);
+  //  lis2dh12_temperature_meas_set(&dev_ctx, LIS2DH12_TEMP_ENABLE);
   /* Set device in continuous mode with 12 bit resol. */
   lis2dh12_operating_mode_set(&dev_ctx, LIS2DH12_HR_12bit);
 
-  /* Read samples in polling mode (no int) */
-  char cnt = 4;
-  while (cnt--)
-  {
+  for (int i = 0; i < SAMPLES; i++)
+  { //sampling 200 data = 2 detik (i.0n 100Hz)
+    uint32_t start_time = HAL_GetTick(); //HAL_GetTick(); resolution in ms
     lis2dh12_reg_t reg;
-    /* Read output only if new value available */
     lis2dh12_xl_data_ready_get(&dev_ctx, &reg.byte);
-
-    if (reg.byte)
+    memset(data_raw_acceleration, 0x00, 3 * sizeof(int16_t));
+    lis2dh12_acceleration_raw_get(&dev_ctx, data_raw_acceleration);
+    acceleration_mg[0] = lis2dh12_from_fs2_hr_to_mg(data_raw_acceleration[0]);
+    acceleration_mg[1] = lis2dh12_from_fs2_hr_to_mg(data_raw_acceleration[1]);
+    acceleration_mg[2] = lis2dh12_from_fs2_hr_to_mg(data_raw_acceleration[2]);
+    // Append formatted data directly to the single buffer (max 18 characters per entry)
+    // Store formatted data in data_buffer (max 18 characters)
+//    snprintf(
+//        data_buffer[i],
+//        sizeof(data_buffer[i]),
+//        "%d,%d,%d\n",
+//        (int) acceleration_mg[0],
+//        (int) acceleration_mg[1],
+//        (int) acceleration_mg[2]);
+//
+//    // Concatenate each line to sd_write_buffer and update total length
+//    size_t line_length = strlen(data_buffer[i]);
+//    memcpy(sd_write_buffer + total_data_length, data_buffer[i], line_length);
+//    total_data_length += line_length;
+    sprintf(
+        (char*) tx_buffer,
+        "%d,%d,%d\n",
+        (int) acceleration_mg[0],
+        (int) acceleration_mg[1],
+        (int) acceleration_mg[2]);
+//  send_uart((char*)tx_buffer);
+//*****************************************************
+    // Check if snprintf wrote successfully and there is enough space
+//    if (written > 0 && (total_data_length + written) < sizeof(data_buffer))
+//    {
+//      total_data_length += written;  // Update total length of valid data
+//    }
+//    else
+//    {
+//      // Handle buffer overflow or snprintf failure
+//      break;
+//    }
+//**************************************************************
+    if (f_open(&fil, filename, FA_OPEN_APPEND | FA_WRITE) == FR_OK)
     {
-      /* Read accelerometer data */
-      memset(data_raw_acceleration, 0x00, 3 * sizeof(int16_t));
-      lis2dh12_acceleration_raw_get(&dev_ctx, data_raw_acceleration);
-      acceleration_mg[0] = lis2dh12_from_fs2_hr_to_mg(data_raw_acceleration[0]);
-      acceleration_mg[1] = lis2dh12_from_fs2_hr_to_mg(data_raw_acceleration[1]);
-      acceleration_mg[2] = lis2dh12_from_fs2_hr_to_mg(data_raw_acceleration[2]);
-      sprintf(
-          (char*) tx_buffer,
-          "Acceleration [mg]:%4.2f\t%4.2f\t%4.2f\r\n",
-          acceleration_mg[0],
-          acceleration_mg[1],
-          acceleration_mg[2]);
-      send_uart((char*)tx_buffer);
+      f_write(&fil, tx_buffer, bufsize(tx_buffer), 0);
+      f_close(&fil);
     }
 
-    lis2dh12_temp_data_ready_get(&dev_ctx, &reg.byte);
-
-    if (reg.byte)
+    // Wait until 10ms have passed
+    while (HAL_GetTick() < start_time + 10)
     {
-      /* Read temperature data */
-      memset(&data_raw_temperature, 0x00, sizeof(int16_t));
-      lis2dh12_temperature_raw_get(&dev_ctx, &data_raw_temperature);
-      temperature_degC = lis2dh12_from_lsb_hr_to_celsius(data_raw_temperature);
-      sprintf((char*) tx_buffer, "Temperature [degC]:%6.2f\r\n", temperature_degC);
-      send_uart((char*)tx_buffer);
+      //wait for 1ms
     }
   }
+  sprintf(buffer, "finish polling sensor data and saved to %s\n", filename);
+  send_uart(buffer);
+}
+
+// Function to write the global data_buffer to SD card
+void write_to_sd(char *data, size_t total_size)
+{
+
+  int counter = 0;
+  int file_exists = 0;
+  char filename[100];
+
+  do
+  {
+    if (counter == 0)
+    {
+      snprintf(filename, sizeof(filename), "result.csv");
+    }
+    else
+    {
+      snprintf(filename, sizeof(filename), "result_%d.csv", counter);
+    }
+
+    if (f_open(&fil, filename, FA_OPEN_EXISTING) == FR_OK)
+    {
+      f_close(&fil);
+      file_exists = 1;
+      counter++;
+    }
+    else
+    {
+      file_exists = 0;
+    }
+  }
+  while (file_exists);
+
+  if (f_open(&fil, filename, FA_OPEN_APPEND | FA_WRITE) == FR_OK)
+  {
+    fresult = f_write(&fil, data, total_size, &br);
+    if (fresult != FR_OK || br != total_size)
+    {
+      // Handle write error
+    }
+    f_close(&fil);
+  }
+  else
+  {
+    // Handle file open error
+  }
+  /* Unmount SDCARD */
+  fresult = f_mount(NULL, "", 0);
+  if (fresult == FR_OK)
+  {
+    send_uart("SD CARD UNMOUNTED successfully...\n");
+  }
+  memset(data_buffer, 0, sizeof(data_buffer));
 }
 
 /*
@@ -288,7 +366,6 @@ static void platform_delay(uint32_t ms)
   HAL_Delay(ms);
 }
 
-
 int bufsize(char *buf)
 {
   int i = 0;
@@ -306,14 +383,13 @@ void clear_buffer(void)
 /* USER CODE END 0 */
 
 /**
-  * @brief  The application entry point.
-  * @retval int
-  */
+ * @brief  The application entry point.
+ * @retval int
+ */
 int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -341,12 +417,16 @@ int main(void)
   MX_USB_PCD_Init();
   MX_I2C1_Init();
   MX_SPI1_Init();
-  if (MX_FATFS_Init() != APP_OK) {
+  if (MX_FATFS_Init() != APP_OK)
+  {
     Error_Handler();
   }
   /* USER CODE BEGIN 2 */
-  logging_sdcard("################\n");
-  int count = 0;
+  //  logging_sdcard("################\n");
+  initialize_sd_card();
+  lis2dh12_read_data_polling();
+//  write_to_sd(sd_write_buffer, total_data_length);
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -356,38 +436,34 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-   count++;
-   sprintf(dummy, "Test : %d\n",count);
-   logging_sdcard(dummy);
-   //logging_sdcard("Test_Logging\n");
-   HAL_Delay(2000);
+//    lis2dh12_read_data_polling();
   }
   /* USER CODE END 3 */
 }
 
 /**
-  * @brief System Clock Configuration
-  * @retval None
-  */
+ * @brief System Clock Configuration
+ * @retval None
+ */
 void SystemClock_Config(void)
 {
-  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
-  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+  RCC_OscInitTypeDef RCC_OscInitStruct = { 0 };
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = { 0 };
 
   /** Configure LSE Drive Capability
-  */
+   */
   HAL_PWR_EnableBkUpAccess();
   __HAL_RCC_LSEDRIVE_CONFIG(RCC_LSEDRIVE_LOW);
 
   /** Configure the main internal regulator output voltage
-  */
+   */
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
   /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_HSE
-                              |RCC_OSCILLATORTYPE_LSE|RCC_OSCILLATORTYPE_MSI;
+   * in the RCC_OscInitTypeDef structure.
+   */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI | RCC_OSCILLATORTYPE_HSE | RCC_OSCILLATORTYPE_LSE
+      | RCC_OSCILLATORTYPE_MSI;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.LSEState = RCC_LSE_ON;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
@@ -408,10 +484,9 @@ void SystemClock_Config(void)
   }
 
   /** Configure the SYSCLKSource, HCLK, PCLK1 and PCLK2 clocks dividers
-  */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK4|RCC_CLOCKTYPE_HCLK2
-                              |RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
-                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+   */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK4 | RCC_CLOCKTYPE_HCLK2 | RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
+      | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
@@ -425,20 +500,20 @@ void SystemClock_Config(void)
   }
 
   /** Enable MSI Auto calibration
-  */
+   */
   HAL_RCCEx_EnableMSIPLLMode();
 }
 
 /**
-  * @brief Peripherals Common Clock Configuration
-  * @retval None
-  */
+ * @brief Peripherals Common Clock Configuration
+ * @retval None
+ */
 void PeriphCommonClock_Config(void)
 {
-  RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
+  RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = { 0 };
 
   /** Initializes the peripherals clock
-  */
+   */
   PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_SMPS;
   PeriphClkInitStruct.SmpsClockSelection = RCC_SMPSCLKSOURCE_HSI;
   PeriphClkInitStruct.SmpsDivSelection = RCC_SMPSCLKDIV_RANGE0;
@@ -453,10 +528,10 @@ void PeriphCommonClock_Config(void)
 }
 
 /**
-  * @brief I2C1 Initialization Function
-  * @param None
-  * @retval None
-  */
+ * @brief I2C1 Initialization Function
+ * @param None
+ * @retval None
+ */
 static void MX_I2C1_Init(void)
 {
 
@@ -482,14 +557,14 @@ static void MX_I2C1_Init(void)
   }
 
   /** Configure Analogue filter
-  */
+   */
   if (HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE) != HAL_OK)
   {
     Error_Handler();
   }
 
   /** Configure Digital filter
-  */
+   */
   if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 0) != HAL_OK)
   {
     Error_Handler();
@@ -501,10 +576,10 @@ static void MX_I2C1_Init(void)
 }
 
 /**
-  * @brief SPI1 Initialization Function
-  * @param None
-  * @retval None
-  */
+ * @brief SPI1 Initialization Function
+ * @param None
+ * @retval None
+ */
 static void MX_SPI1_Init(void)
 {
 
@@ -541,10 +616,10 @@ static void MX_SPI1_Init(void)
 }
 
 /**
-  * @brief USART1 Initialization Function
-  * @param None
-  * @retval None
-  */
+ * @brief USART1 Initialization Function
+ * @param None
+ * @retval None
+ */
 static void MX_USART1_UART_Init(void)
 {
 
@@ -589,10 +664,10 @@ static void MX_USART1_UART_Init(void)
 }
 
 /**
-  * @brief USB Initialization Function
-  * @param None
-  * @retval None
-  */
+ * @brief USB Initialization Function
+ * @param None
+ * @retval None
+ */
 static void MX_USB_PCD_Init(void)
 {
 
@@ -622,15 +697,15 @@ static void MX_USB_PCD_Init(void)
 }
 
 /**
-  * @brief GPIO Initialization Function
-  * @param None
-  * @retval None
-  */
+ * @brief GPIO Initialization Function
+ * @param None
+ * @retval None
+ */
 static void MX_GPIO_Init(void)
 {
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
-/* USER CODE BEGIN MX_GPIO_Init_1 */
-/* USER CODE END MX_GPIO_Init_1 */
+  GPIO_InitTypeDef GPIO_InitStruct = { 0 };
+  /* USER CODE BEGIN MX_GPIO_Init_1 */
+  /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOC_CLK_ENABLE();
@@ -639,7 +714,7 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOD_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, LD2_Pin|LD3_Pin|LD1_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, LD2_Pin | LD3_Pin | LD1_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_10, GPIO_PIN_RESET);
@@ -651,7 +726,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : LD2_Pin LD3_Pin LD1_Pin */
-  GPIO_InitStruct.Pin = LD2_Pin|LD3_Pin|LD1_Pin;
+  GPIO_InitStruct.Pin = LD2_Pin | LD3_Pin | LD1_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -665,13 +740,13 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
   /*Configure GPIO pins : B2_Pin B3_Pin */
-  GPIO_InitStruct.Pin = B2_Pin|B3_Pin;
+  GPIO_InitStruct.Pin = B2_Pin | B3_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
-/* USER CODE BEGIN MX_GPIO_Init_2 */
-/* USER CODE END MX_GPIO_Init_2 */
+  /* USER CODE BEGIN MX_GPIO_Init_2 */
+  /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
@@ -679,9 +754,9 @@ static void MX_GPIO_Init(void)
 /* USER CODE END 4 */
 
 /**
-  * @brief  This function is executed in case of error occurrence.
-  * @retval None
-  */
+ * @brief  This function is executed in case of error occurrence.
+ * @retval None
+ */
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
@@ -695,12 +770,12 @@ void Error_Handler(void)
 
 #ifdef  USE_FULL_ASSERT
 /**
-  * @brief  Reports the name of the source file and the source line number
-  *         where the assert_param error has occurred.
-  * @param  file: pointer to the source file name
-  * @param  line: assert_param error line source number
-  * @retval None
-  */
+ * @brief  Reports the name of the source file and the source line number
+ *         where the assert_param error has occurred.
+ * @param  file: pointer to the source file name
+ * @param  line: assert_param error line source number
+ * @retval None
+ */
 void assert_failed(uint8_t *file, uint32_t line)
 {
   /* USER CODE BEGIN 6 */
